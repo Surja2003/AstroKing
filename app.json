@@ -4,6 +4,9 @@
       "eas": {
         "projectId": "cbfa9583-fc11-40c1-934d-526dce5bbb9c"
       }
+    },
+    "android": {
+      "package": "com.nespendra.astroking"
     }
   }
 }
