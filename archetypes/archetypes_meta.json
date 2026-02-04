@@ -1,0 +1,14 @@
+{
+  "The Strategist": {
+    "summary": "Calm, analytical, plan-first",
+    "traits": ["Analytical", "Calm", "Disciplined"]
+  },
+  "The Empath": {
+    "summary": "Warm, intuitive, relationship-oriented",
+    "traits": ["Empathetic", "Intuitive", "Supportive"]
+  },
+  "The Builder": {
+    "summary": "Practical, steady, progress-driven",
+    "traits": ["Practical", "Persistent", "Grounded"]
+  }
+}

@@ -1,0 +1,14 @@
+fastapi
+uvicorn[standard]
+python-multipart
+numpy
+opencv-python
+mediapipe
+pillow
+sqlalchemy
+requests
+textblob
+
+# Embedding-based personality matching uses a TFLite interpreter.
+# On Windows, `tflite-runtime` wheels are often unavailable, so we default to TensorFlow.
+tensorflow>=2.15,<2.18

@@ -1,0 +1,4 @@
+palm_env/
+__pycache__/
+*.pyc
+uvicorn.*.log

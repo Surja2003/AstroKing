@@ -1,0 +1,9 @@
+# Keep ML deps isolated from backend.
+# TensorFlow supports Python 3.11 on Windows in recent versions.
+
+tensorflow>=2.15,<2.18
+numpy>=1.24
+pillow>=10.0
+scikit-learn>=1.3
+joblib>=1.3
+tqdm>=4.66

@@ -1,0 +1,25 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Data and artifacts
+/data/
+/models/
+*.h5
+*.keras
+*.tflite
+*.npz
+*.pkl
+
+# Logs
+*.log
+runs/
+
+# Local-only quick tests (keep README tracked)
+sample_images/
+!sample_images/README.md
+
+# Extra safety: don't accidentally commit loose images at ml/ root
+/*.jpg
+/*.jpeg
+/*.png
