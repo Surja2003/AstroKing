@@ -49,7 +49,12 @@ npx expo start --dev-client -c
 
 ## Backend (FastAPI)
 
-This app expects a FastAPI backend (default `:8000`).
+This app expects a FastAPI backend.
+
+- Default (recommended): `https://astroking.onrender.com`
+- Local/LAN dev: set `EXPO_PUBLIC_API_URL` (see below)
+
+Note: Render free tier sleeps after inactivity; the first request can take ~30–40s.
 
 1. Start the backend (LAN-accessible for phones)
 
@@ -83,7 +88,7 @@ Optional overlay:
 
 3. If you’re testing on a physical device, set your LAN IP
 
-   Copy [.env.example](.env.example) to `.env` and update:
+   Copy [.env.example](.env.example) to `.env` and update (only needed for local/LAN dev):
 
    ```bash
    EXPO_PUBLIC_API_URL=http://<YOUR_LAN_IP>:8000

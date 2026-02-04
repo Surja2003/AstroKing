@@ -3,6 +3,8 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 
+const DEFAULT_API_URL = 'https://astroking.onrender.com';
+
 function getExpoHost() {
   const hostUri =
     Constants.expoConfig?.hostUri ??
@@ -25,39 +27,12 @@ export function getApiBaseUrl() {
   const env = process.env.EXPO_PUBLIC_API_URL;
   if (env) return env;
 
-  // Web should hit localhost.
-  if (Platform.OS === 'web') return 'http://localhost:8000';
-
-  // Android emulator should hit the host machine via 10.0.2.2.
-  // This avoids flaky LAN IP routing inside the emulator.
-  if (Platform.OS === 'android' && !Device.isDevice) {
-    return 'http://10.0.2.2:8000';
-  }
-
-  // Physical device on LAN: use the Expo dev server host IP.
-  const host = getExpoHost();
-  if (host) {
-    // iOS simulator (on macOS) can use localhost; for other cases we still try.
-    if (host === 'localhost' || host === '127.0.0.1') {
-      return 'http://localhost:8000';
-    }
-
-    // If Expo is running in tunnel mode, host may be a domain; backend usually isn't tunneled.
-    if (!isIpAddress(host)) {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[API] Expo host is "${host}" (likely tunnel). Set EXPO_PUBLIC_API_URL=http://<YOUR_LAN_IP>:8000 for device testing.`
-      );
-    }
-
-    return `http://${host}:8000`;
-  }
-
-  // Fallback (works for iOS simulator, not for physical device).
-  return 'http://127.0.0.1:8000';
+  // Production default (global): use the hosted backend.
+  return DEFAULT_API_URL;
 }
 
 export const api = axios.create({
   baseURL: getApiBaseUrl(),
-  timeout: 15000,
+  // Render free tier may take ~30-40s on the first request after sleeping.
+  timeout: 60000,
 });
