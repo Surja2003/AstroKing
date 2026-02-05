@@ -213,18 +213,71 @@ def analyze_palm(data: dict):
     Intended for on-device CV where the phone sends only extracted numbers.
     """
 
-    d = data.get("lineDensity", 0)
-    try:
-        d = float(d)
-    except Exception:
-        d = 0.0
+    features = data.get("features") or {}
+    d = data.get("lineDensity", None)
 
-    if d > 35000:
-        result = "Strong emotional lines — intuitive personality"
-    elif d > 25000:
-        result = "Balanced and practical nature"
+    # Prefer richer on-device metrics when present.
+    line_density = None
+    try:
+        v = (
+            (features.get("line") or {}).get("pixelDensity")
+            if isinstance(features, dict)
+            else None
+        )
+        if v is not None:
+            line_density = float(v)
+    except Exception:
+        line_density = None
+
+    # Backwards-compatible numeric proxy.
+    d_f = 0.0
+    try:
+        if d is not None:
+            d_f = float(d)
+    except Exception:
+        d_f = 0.0
+
+    heart_len = 0.0
+    head_len = 0.0
+    life_len = 0.0
+    try:
+        seg = features.get("segments") or {}
+        heart_len = float((seg.get("heart") or {}).get("length") or 0)
+        head_len = float((seg.get("head") or {}).get("length") or 0)
+        life_len = float((seg.get("life") or {}).get("length") or 0)
+    except Exception:
+        heart_len = head_len = life_len = 0.0
+
+    # Ultra-light interpretation rules.
+    # - If we have line_density (0..1-ish), use it.
+    # - Else fall back to old edgeCount thresholds.
+    if line_density is not None:
+        if line_density > 0.20:
+            result = "Strong, vivid lines — high intensity and emotional depth"
+        elif line_density > 0.12:
+            result = "Balanced lines — steady, practical, and adaptable"
+        else:
+            result = "Softer lines — calm, reflective, and analytical"
     else:
-        result = "Calm, analytical thinker"
+        if d_f > 35000:
+            result = "Strong emotional lines — intuitive personality"
+        elif d_f > 25000:
+            result = "Balanced and practical nature"
+        else:
+            result = "Calm, analytical thinker"
+
+    # Add a tiny hint when major-line segmentation is available.
+    if (heart_len + head_len + life_len) > 0:
+        dominant = max(
+            [("heart", heart_len), ("head", head_len), ("life", life_len)],
+            key=lambda x: x[1],
+        )[0]
+        if dominant == "heart":
+            result += "\n\nDominant: Heart line — expressive and relationship-focused."
+        elif dominant == "head":
+            result += "\n\nDominant: Head line — logical and focused decision-making."
+        else:
+            result += "\n\nDominant: Life line — resilient energy and groundedness."
 
     return {"result": result}
 

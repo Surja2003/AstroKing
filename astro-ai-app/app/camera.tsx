@@ -8,10 +8,258 @@ import { useUser } from '../context/user-context';
 import { useTranslation } from 'react-i18next';
 import { useColorScheme } from '../hooks/use-color-scheme';
 import { getAppColors } from '../lib/ui-theme';
-import { requireOptionalNativeModule } from 'expo-modules-core';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as UPNG from 'upng-js';
 import { toByteArray } from 'base64-js';
+
+type PalmLineClass = 'heart' | 'head' | 'life' | 'other';
+
+type PalmFeaturesV1 = {
+  version: 1;
+  image: { width: number; height: number };
+  roi: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    fillRatio: number;
+  };
+  line: {
+    pixelCount: number;
+    pixelDensity: number;
+  };
+  segments: {
+    totalCount: number;
+    totalLength: number;
+    heart: { count: number; length: number; meanAngleDeg: number };
+    head: { count: number; length: number; meanAngleDeg: number };
+    life: { count: number; length: number; meanAngleDeg: number };
+  };
+};
+
+const tryRequireFastOpenCV = (): null | any => {
+  try {
+    // NOTE: Native module. Requires a dev-client/EAS build.
+    // Keep require() inside a function so Expo Go/web don't hard-crash.
+    return require('react-native-fast-opencv');
+  } catch {
+    return null;
+  }
+};
+
+const classifySegment = (midX: number, midY: number, angleDegAbs: number): PalmLineClass => {
+  // Heuristic, normalized to ROI coordinates:
+  // - Heart line: upper palm, roughly horizontal
+  // - Head line: middle palm, roughly horizontal
+  // - Life line: near either side (thumb side differs per hand), more diagonal/vertical
+  if (midY < 0.35 && angleDegAbs < 45) return 'heart';
+  if (midY < 0.70 && angleDegAbs < 45) return 'head';
+  const sideProximity = Math.min(midX, 1 - midX);
+  if (sideProximity < 0.25 && angleDegAbs > 30) return 'life';
+  return 'other';
+};
+
+const safeMeanAngleDeg = (anglesDegAbs: number[]): number => {
+  if (!anglesDegAbs.length) return 0;
+  const s = anglesDegAbs.reduce((a, b) => a + b, 0);
+  return s / anglesDegAbs.length;
+};
+
+const extractPalmFeaturesWithFastOpenCV = (params: {
+  base64Png: string;
+  width: number;
+  height: number;
+}): PalmFeaturesV1 => {
+  const mod = tryRequireFastOpenCV();
+  if (!mod?.OpenCV) throw new Error('FastOpenCV not available');
+
+  const {
+    OpenCV,
+    ObjectType,
+    DataTypes,
+    ColorConversionCodes,
+    MorphShapes,
+    MorphTypes,
+    RetrievalModes,
+    ContourApproximationModes,
+    AdaptiveThresholdTypes,
+    ThresholdTypes,
+  } = mod;
+
+  const { base64Png, width, height } = params;
+
+  // Keep everything best-effort; always release buffers.
+  try {
+    const src = OpenCV.base64ToMat(base64Png);
+
+    const hsv = OpenCV.createObject(ObjectType.Mat, height, width, DataTypes.CV_8UC3);
+    OpenCV.invoke('cvtColor', src, hsv, ColorConversionCodes.COLOR_BGR2HSV);
+
+    // HSV skin-ish mask (broad, works ok across lighting)
+    const lower = OpenCV.createObject(ObjectType.Scalar, 0, 25, 40);
+    const upper = OpenCV.createObject(ObjectType.Scalar, 30, 255, 255);
+    const skinMask = OpenCV.createObject(ObjectType.Mat, height, width, DataTypes.CV_8UC1);
+    OpenCV.invoke('inRange', hsv, lower, upper, skinMask);
+
+    // Clean mask
+    const kSizeClose = OpenCV.createObject(ObjectType.Size, 9, 9);
+    const kClose = OpenCV.invoke('getStructuringElement', MorphShapes.MORPH_ELLIPSE, kSizeClose);
+    const maskClosed = OpenCV.createObject(ObjectType.Mat, height, width, DataTypes.CV_8UC1);
+    OpenCV.invoke('morphologyEx', skinMask, maskClosed, MorphTypes.MORPH_CLOSE, kClose);
+
+    const contours = OpenCV.createObject(ObjectType.MatVector);
+    OpenCV.invoke('findContours', maskClosed, contours, RetrievalModes.RETR_EXTERNAL, ContourApproximationModes.CHAIN_APPROX_SIMPLE);
+
+    const contourMeta = OpenCV.toJSValue(contours);
+    const contourCount: number = Array.isArray(contourMeta?.array) ? contourMeta.array.length : 0;
+    if (!contourCount) {
+      throw new Error('No palm contour found');
+    }
+
+    let bestIdx = 0;
+    let bestArea = -1;
+    for (let i = 0; i < contourCount; i++) {
+      const contour = OpenCV.copyObjectFromVector(contours, i);
+      const a = OpenCV.invoke('contourArea', contour)?.value ?? 0;
+      if (a > bestArea) {
+        bestArea = a;
+        bestIdx = i;
+      }
+    }
+    const bestContour = OpenCV.copyObjectFromVector(contours, bestIdx);
+    const roiRect = OpenCV.invoke('boundingRect', bestContour);
+    const roiX = Math.max(0, roiRect?.x ?? 0);
+    const roiY = Math.max(0, roiRect?.y ?? 0);
+    const roiW = Math.max(1, roiRect?.width ?? width);
+    const roiH = Math.max(1, roiRect?.height ?? height);
+
+    const roi = OpenCV.createObject(ObjectType.Mat, roiH, roiW, DataTypes.CV_8UC3);
+    OpenCV.invoke('crop', src, roi, roiRect);
+    const roiMask = OpenCV.createObject(ObjectType.Mat, roiH, roiW, DataTypes.CV_8UC1);
+    OpenCV.invoke('crop', maskClosed, roiMask, roiRect);
+
+    const roiMaskPixels = OpenCV.invoke('countNonZero', roiMask)?.value ?? 0;
+    const roiArea = roiW * roiH;
+    const fillRatio = roiArea > 0 ? roiMaskPixels / roiArea : 0;
+
+    // Line enhancement + binarization
+    const gray = OpenCV.createObject(ObjectType.Mat, roiH, roiW, DataTypes.CV_8UC1);
+    OpenCV.invoke('cvtColor', roi, gray, ColorConversionCodes.COLOR_BGR2GRAY);
+
+    const blur = OpenCV.createObject(ObjectType.Mat, roiH, roiW, DataTypes.CV_8UC1);
+    const blurK = OpenCV.createObject(ObjectType.Size, 5, 5);
+    OpenCV.invoke('GaussianBlur', gray, blur, blurK, 0);
+
+    const bin = OpenCV.createObject(ObjectType.Mat, roiH, roiW, DataTypes.CV_8UC1);
+    OpenCV.invoke(
+      'adaptiveThreshold',
+      blur,
+      bin,
+      255,
+      AdaptiveThresholdTypes.ADAPTIVE_THRESH_GAUSSIAN_C,
+      ThresholdTypes.THRESH_BINARY_INV,
+      15,
+      2
+    );
+
+    // Keep only within ROI mask
+    const binMasked = OpenCV.createObject(ObjectType.Mat, roiH, roiW, DataTypes.CV_8UC1);
+    OpenCV.invoke('bitwise_and', bin, bin, binMasked, roiMask);
+
+    const linePixelCount = OpenCV.invoke('countNonZero', binMasked)?.value ?? 0;
+    const linePixelDensity = roiMaskPixels > 0 ? linePixelCount / roiMaskPixels : 0;
+
+    // Edges + Hough segments
+    const edges = OpenCV.createObject(ObjectType.Mat, roiH, roiW, DataTypes.CV_8UC1);
+    OpenCV.invoke('Canny', blur, edges, 60, 160);
+
+    const edgesMasked = OpenCV.createObject(ObjectType.Mat, roiH, roiW, DataTypes.CV_8UC1);
+    OpenCV.invoke('bitwise_and', edges, edges, edgesMasked, roiMask);
+
+    const lines = OpenCV.createObject(ObjectType.Mat, 0, 0, DataTypes.CV_32SC4);
+    OpenCV.invoke('HoughLinesP', edgesMasked, lines, 1, Math.PI / 180, 45);
+
+    const linesBuf = OpenCV.matToBuffer(lines, 'int32');
+    const buf: Int32Array | undefined = linesBuf?.buffer;
+    const channels = Number(linesBuf?.channels ?? 0);
+    const segCount = buf && channels === 4 ? Math.floor(buf.length / 4) : 0;
+
+    let totalLength = 0;
+    const byClass: Record<Exclude<PalmLineClass, 'other'>, { count: number; length: number; angles: number[] }> = {
+      heart: { count: 0, length: 0, angles: [] },
+      head: { count: 0, length: 0, angles: [] },
+      life: { count: 0, length: 0, angles: [] },
+    };
+
+    const minLen = Math.max(10, Math.floor(Math.min(roiW, roiH) * 0.12));
+
+    for (let i = 0; i < segCount; i++) {
+      const x1 = buf![i * 4 + 0];
+      const y1 = buf![i * 4 + 1];
+      const x2 = buf![i * 4 + 2];
+      const y2 = buf![i * 4 + 3];
+
+      const dx = x2 - x1;
+      const dy = y2 - y1;
+      const len = Math.hypot(dx, dy);
+      if (!Number.isFinite(len) || len < minLen) continue;
+
+      const midX = (x1 + x2) / 2 / roiW;
+      const midY = (y1 + y2) / 2 / roiH;
+      const angleDegAbs = Math.abs((Math.atan2(dy, dx) * 180) / Math.PI);
+
+      const cls = classifySegment(midX, midY, angleDegAbs);
+      totalLength += len;
+
+      if (cls === 'heart' || cls === 'head' || cls === 'life') {
+        byClass[cls].count += 1;
+        byClass[cls].length += len;
+        byClass[cls].angles.push(angleDegAbs);
+      }
+    }
+
+    return {
+      version: 1,
+      image: { width, height },
+      roi: {
+        x: roiX,
+        y: roiY,
+        width: roiW,
+        height: roiH,
+        fillRatio,
+      },
+      line: {
+        pixelCount: linePixelCount,
+        pixelDensity: linePixelDensity,
+      },
+      segments: {
+        totalCount: segCount,
+        totalLength,
+        heart: {
+          count: byClass.heart.count,
+          length: byClass.heart.length,
+          meanAngleDeg: safeMeanAngleDeg(byClass.heart.angles),
+        },
+        head: {
+          count: byClass.head.count,
+          length: byClass.head.length,
+          meanAngleDeg: safeMeanAngleDeg(byClass.head.angles),
+        },
+        life: {
+          count: byClass.life.count,
+          length: byClass.life.length,
+          meanAngleDeg: safeMeanAngleDeg(byClass.life.angles),
+        },
+      },
+    };
+  } finally {
+    try {
+      mod.OpenCV.clearBuffers();
+    } catch {
+      // ignore
+    }
+  }
+};
 
 export default function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -113,28 +361,13 @@ export default function CameraScreen() {
     };
   }, [permission, hasPermission, loading, t]);
 
-  const uriToBase64 = async (uri: string) => {
-    const res = await fetch(uri);
-    const blob = await res.blob();
-    return await new Promise<string>((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onerror = () => reject(new Error('Could not read image'));
-      reader.onloadend = () => {
-        const result = String(reader.result || '');
-        const comma = result.indexOf(',');
-        resolve(comma >= 0 ? result.slice(comma + 1) : result);
-      };
-      reader.readAsDataURL(blob);
-    });
-  };
-
   const uploadPalm = async (input: { uri?: string; base64?: string }) => {
     const name = user?.name?.trim() || 'Friend';
     const dob = user?.dob?.trim() || '2000-01-01';
 
     const analyzeOnDeviceAndSend = async (uri: string) => {
-      // Convert to a small PNG (predictable decoding) and compute an edge-density feature.
-      // Then send ONLY numbers to the backend.
+      // Convert to a small PNG (predictable decoding).
+      // Then extract features on-device and send ONLY numbers to the backend.
       const manipulated = await ImageManipulator.manipulateAsync(
         uri,
         [{ resize: { width: 512 } }],
@@ -144,55 +377,78 @@ export default function CameraScreen() {
       const b64 = manipulated?.base64;
       if (!b64) throw new Error('Could not read image');
 
-      const bytes = toByteArray(b64);
-      const png = UPNG.decode(bytes.buffer);
-      // toRGBA8 returns an array of frames; we only have 1 frame.
-      const rgbaFrames = UPNG.toRGBA8(png);
-      const rgba = rgbaFrames?.[0];
-      if (!rgba) throw new Error('Could not decode image');
-
-      const w = png.width | 0;
-      const h = png.height | 0;
-      if (!w || !h) throw new Error('Invalid image size');
-
-      // Grayscale
-      const gray = new Uint8Array(w * h);
-      for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
-        const r = rgba[p] as number;
-        const g = rgba[p + 1] as number;
-        const b = rgba[p + 2] as number;
-        gray[i] = ((r * 30 + g * 59 + b * 11) / 100) | 0;
+      // 1) Try real ROI segmentation + line segments via native OpenCV.
+      // 2) Fallback to JS edge-density proxy if native module isn't in the build.
+      let features: PalmFeaturesV1 | null = null;
+      try {
+        features = extractPalmFeaturesWithFastOpenCV({
+          base64Png: b64,
+          width: manipulated.width ?? 512,
+          height: manipulated.height ?? 512,
+        });
+      } catch {
+        features = null;
       }
 
-      // Simple Sobel edge count (proxy for "line density")
+      // Legacy numeric: edgeCount for backward compatibility & keepalive.
       let edgeCount = 0;
-      const thr = 80; // tuned for 512px inputs; adjust if needed
+      if (!features) {
+        const bytes = toByteArray(b64);
+        const png = UPNG.decode(bytes.buffer);
+        const rgbaFrames = UPNG.toRGBA8(png);
+        const rgba = rgbaFrames?.[0];
+        if (!rgba) throw new Error('Could not decode image');
 
-      for (let y = 1; y < h - 1; y++) {
-        const row = y * w;
-        for (let x = 1; x < w - 1; x++) {
-          const i = row + x;
+        const w = png.width | 0;
+        const h = png.height | 0;
+        if (!w || !h) throw new Error('Invalid image size');
 
-          const a00 = gray[i - w - 1];
-          const a01 = gray[i - w];
-          const a02 = gray[i - w + 1];
-          const a10 = gray[i - 1];
-          const a12 = gray[i + 1];
-          const a20 = gray[i + w - 1];
-          const a21 = gray[i + w];
-          const a22 = gray[i + w + 1];
-
-          const gx = -a00 + a02 - (a10 << 1) + (a12 << 1) - a20 + a22;
-          const gy = -a00 - (a01 << 1) - a02 + a20 + (a21 << 1) + a22;
-          const mag = Math.abs(gx) + Math.abs(gy);
-          if (mag > thr) edgeCount++;
+        const gray = new Uint8Array(w * h);
+        for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
+          const r = rgba[p] as number;
+          const g = rgba[p + 1] as number;
+          const b = rgba[p + 2] as number;
+          gray[i] = ((r * 30 + g * 59 + b * 11) / 100) | 0;
         }
+
+        let count = 0;
+        const thr = 80;
+        for (let y = 1; y < h - 1; y++) {
+          const row = y * w;
+          for (let x = 1; x < w - 1; x++) {
+            const i = row + x;
+
+            const a00 = gray[i - w - 1];
+            const a01 = gray[i - w];
+            const a02 = gray[i - w + 1];
+            const a10 = gray[i - 1];
+            const a12 = gray[i + 1];
+            const a20 = gray[i + w - 1];
+            const a21 = gray[i + w];
+            const a22 = gray[i + w + 1];
+
+            const gx = -a00 + a02 - (a10 << 1) + (a12 << 1) - a20 + a22;
+            const gy = -a00 - (a01 << 1) - a02 + a20 + (a21 << 1) + a22;
+            const mag = Math.abs(gx) + Math.abs(gy);
+            if (mag > thr) count++;
+          }
+        }
+        edgeCount = count;
+      } else {
+        // When OpenCV features are present, keep a stable numeric proxy too.
+        const roiArea = Math.max(1, features.roi.width * features.roi.height);
+        edgeCount = Math.round(features.line.pixelCount * (512 * 512) / roiArea);
       }
 
       const res = await fetch(`${api.defaults.baseURL}/analyze-palm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ lineDensity: edgeCount, name, dob }),
+        body: JSON.stringify({
+          name,
+          dob,
+          lineDensity: edgeCount,
+          features,
+        }),
       });
 
       if (!res.ok) {
@@ -202,35 +458,13 @@ export default function CameraScreen() {
       return await res.json();
     };
 
-    // Prefer on-device feature extraction on native.
-    if (Platform.OS !== 'web' && input?.uri) {
-      try {
-        return await analyzeOnDeviceAndSend(input.uri);
-      } catch {
-        Alert.alert(t('camera.uploadFailed'), 'Lighting too low. Try again in brighter light.');
-        return { result: '' };
-      }
+    if (!input?.uri) throw new Error('No image available');
+    try {
+      return await analyzeOnDeviceAndSend(input.uri);
+    } catch {
+      Alert.alert(t('camera.uploadFailed'), 'Lighting too low. Try again in brighter light.');
+      return { result: '' };
     }
-
-    let base64 = input?.base64;
-    if (!base64 && Platform.OS === 'web' && input?.uri) {
-      base64 = await uriToBase64(input.uri);
-    }
-    if (!base64) throw new Error('No image available to upload');
-
-    const res = await api.post(
-      '/upload-palm',
-      {
-        image: base64,
-        name,
-        dob,
-      },
-      {
-        timeout: 60000,
-        headers: { 'Content-Type': 'application/json' },
-      }
-    );
-    return res?.data;
   };
 
   const showResultAlert = (data: any) => {
@@ -273,13 +507,6 @@ export default function CameraScreen() {
   };
 
   const getImagePicker = async () => {
-    // Avoid crashing the app when running a dev-client build that
-    // doesn't include expo-image-picker in the native binary.
-    if (Platform.OS !== 'web') {
-      const native = requireOptionalNativeModule?.('ExponentImagePicker');
-      if (!native) return null;
-    }
-
     try {
       return await import('expo-image-picker');
     } catch {
