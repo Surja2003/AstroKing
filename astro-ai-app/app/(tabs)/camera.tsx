@@ -2,15 +2,16 @@ import { CameraView, useCameraPermissions } from 'expo-camera';
 import React, { useEffect, useRef, useState } from 'react';
 import MaterialIcons from '@expo/vector-icons/MaterialIcons';
 import { Alert, Button, Platform, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import ScreenWrapper from '../components/ScreenWrapper';
-import { api } from '../lib/api';
-import { useUser } from '../context/user-context';
+import ScreenWrapper from '../../components/ScreenWrapper';
+import { api } from '../../lib/api';
+import { useUser } from '../../context/user-context';
 import { useTranslation } from 'react-i18next';
-import { useColorScheme } from '../hooks/use-color-scheme';
-import { getAppColors } from '../lib/ui-theme';
+import { useColorScheme } from '../../hooks/use-color-scheme';
+import { getAppColors } from '../../lib/ui-theme';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as UPNG from 'upng-js';
 import { toByteArray } from 'base64-js';
+import { appendLocalPalmHistory } from '../../lib/palm-history';
 
 type PalmLineClass = 'heart' | 'head' | 'life' | 'other';
 
@@ -467,10 +468,11 @@ export default function CameraScreen() {
     }
   };
 
-  const showResultAlert = (data: any) => {
+  const showResultAlert = (data: any): string => {
     if (typeof data?.result === 'string' && data.result.trim()) {
-      Alert.alert(t('camera.analysis'), data.result.trim());
-      return;
+      const msg = data.result.trim();
+      Alert.alert(t('camera.analysis'), msg);
+      return msg;
     }
 
     const traits: string[] = data?.traits ?? data?.analysis?.traits ?? [];
@@ -481,24 +483,36 @@ export default function CameraScreen() {
 
     if (combinedTraits.length) {
       const title = topLabel ? `AI Analysis — ${topLabel}` : t('camera.analysis');
-      Alert.alert(title, combinedTraits.join('\n'));
-    } else {
-      Alert.alert(t('camera.success'), t('camera.uploaded'));
+      const msg = combinedTraits.join('\n');
+      Alert.alert(title, msg);
+      return msg;
     }
+
+    const fallback = t('camera.uploaded');
+    Alert.alert(t('camera.success'), fallback);
+    return fallback;
   };
 
   const takePhoto = async () => {
     if (!cameraRef.current || loading || (!canCapture && Platform.OS !== 'web')) return;
     setLoading(true);
 
+    const name = user?.name?.trim() || 'Friend';
+    const dob = user?.dob?.trim() || '2000-01-01';
+
     try {
-      // NOTE: CameraView exposes takePictureAsync via its ref in Expo SDKs that support it.
-      // If your SDK complains about typing, we can type the ref as `any`.
       const photo: any = await (cameraRef.current as any).takePictureAsync({ base64: true, quality: 0.8 });
       if (!photo?.uri && !photo?.base64) throw new Error('No image returned from camera');
 
       const data = await uploadPalm({ uri: photo?.uri, base64: photo?.base64 });
-      showResultAlert(data);
+      const msg = showResultAlert(data);
+      if (photo?.uri && name && dob && msg) {
+        try {
+          await appendLocalPalmHistory(name, dob, { imageUri: photo.uri, message: msg });
+        } catch {
+          // ignore
+        }
+      }
     } catch (e: any) {
       Alert.alert(t('camera.uploadFailed'), e?.message ?? t('camera.couldNotUpload'));
     } finally {
@@ -517,6 +531,9 @@ export default function CameraScreen() {
   const pickFromGallery = async () => {
     if (loading) return;
     setLoading(true);
+
+    const name = user?.name?.trim() || 'Friend';
+    const dob = user?.dob?.trim() || '2000-01-01';
 
     try {
       const ImagePicker = await getImagePicker();
@@ -544,7 +561,14 @@ export default function CameraScreen() {
       if (!asset?.uri) throw new Error('No image selected');
 
       const data = await uploadPalm({ uri: asset.uri, base64: (asset as any).base64 });
-      showResultAlert(data);
+      const msg = showResultAlert(data);
+      if (asset?.uri && name && dob && msg) {
+        try {
+          await appendLocalPalmHistory(name, dob, { imageUri: asset.uri, message: msg });
+        } catch {
+          // ignore
+        }
+      }
     } catch (e: any) {
       Alert.alert(t('camera.uploadFailed'), e?.message ?? t('camera.couldNotUpload'));
     } finally {

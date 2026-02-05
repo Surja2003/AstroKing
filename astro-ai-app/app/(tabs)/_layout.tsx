@@ -62,6 +62,45 @@ export default function TabLayout() {
           },
         }}
       />
+
+      <Tabs.Screen
+        name="camera"
+        options={{
+          title: t('nav.palmScan'),
+          tabBarIcon: ({ color, focused }) => {
+            const glowStyle = focused
+              ? Platform.select({
+                  web: {
+                    boxShadow: `0 0 16px ${c.primarySoft}`,
+                  } as any,
+                  default: {
+                    shadowColor: c.primary,
+                    shadowOpacity: 0.45,
+                    shadowRadius: 10,
+                    shadowOffset: { width: 0, height: 4 },
+                    elevation: 6,
+                  },
+                })
+              : null;
+
+            return (
+              <View
+                style={[
+                  {
+                    padding: 6,
+                    borderRadius: 999,
+                    backgroundColor: focused ? c.primarySoft : 'transparent',
+                  },
+                  glowStyle,
+                ]}
+              >
+                <IconSymbol size={28} name="camera.fill" color={color} />
+              </View>
+            );
+          },
+        }}
+      />
+
       <Tabs.Screen
         name="explore"
         options={{

@@ -10,6 +10,7 @@ import { useTranslation } from 'react-i18next';
 import { useAppColors, shadowStyle } from '../lib/ui-theme';
 import { useColorScheme } from '../hooks/use-color-scheme';
 import { padding, radius } from '../lib/theme';
+import { loadLocalPalmHistory } from '../lib/palm-history';
 
 type ChatItem = {
   id: number;
@@ -20,10 +21,12 @@ type ChatItem = {
 };
 
 type PalmItem = {
-  id: number;
-  image_path: string;
+  id: number | string;
+  image_path?: string;
   image_url?: string | null;
   created_at?: string | null;
+  local_uri?: string | null;
+  message?: string | null;
 };
 
 type SummaryItem = {
@@ -90,15 +93,26 @@ export default function HistoryScreen() {
           return;
         }
 
-        const [chatRes, palmRes, summaryRes] = await Promise.all([
+        const [chatRes, palmRes, summaryRes, localPalms] = await Promise.all([
           api.get<ChatHistoryResponse>(`/history/chat?name=${encodeURIComponent(name)}&dob=${encodeURIComponent(dob)}&limit=10`),
           api.get<PalmHistoryResponse>(`/history/palms?name=${encodeURIComponent(name)}&dob=${encodeURIComponent(dob)}&limit=5`),
           api.get<SummaryHistoryResponse>(`/history/summaries?name=${encodeURIComponent(name)}&dob=${encodeURIComponent(dob)}&limit=10`),
+          loadLocalPalmHistory(name, dob, 10),
         ]);
 
         if (cancelled) return;
         setChats(chatRes.data?.items ?? []);
-        setPalms(palmRes.data?.items ?? []);
+        const remote = palmRes.data?.items ?? [];
+        const local = (localPalms ?? []).map((p) => ({
+          id: p.id,
+          created_at: p.created_at,
+          local_uri: p.local_uri,
+          message: p.message,
+        } as PalmItem));
+
+        // Show most recent first, mixing local + remote.
+        const merged = [...local, ...remote].sort((a, b) => String(b.created_at ?? '').localeCompare(String(a.created_at ?? '')));
+        setPalms(merged);
         setSummaries(summaryRes.data?.items ?? []);
       } catch {
         if (!cancelled) setError(t('errors.historyLoad'));
@@ -277,6 +291,9 @@ export default function HistoryScreen() {
                 {!!item.created_at && <Text style={[styles.stamp, { color: c.muted }]}>{formatStamp(item.created_at)}</Text>}
               </View>
               {(() => {
+                const localUri = String(item.local_uri ?? '').trim();
+                if (localUri) return <Image source={{ uri: localUri }} style={styles.palmImage} />;
+
                 const urlFromApi = item.image_url ?? '';
                 const fallbackUrl = apiBaseUrl
                   ? `${apiBaseUrl}/${String(item.image_path ?? '').replace(/\\/g, '/').replace(/^\//, '')}`
@@ -284,6 +301,10 @@ export default function HistoryScreen() {
                 const uri = urlFromApi || fallbackUrl;
                 return uri ? <Image source={{ uri }} style={styles.palmImage} /> : null;
               })()}
+
+              {!!item.message && String(item.message).trim() ? (
+                <Text style={[styles.palmMessage, { color: c.textSecondary }]}>{String(item.message).trim()}</Text>
+              ) : null}
             </View>
           )}
         />
@@ -398,6 +419,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginTop: 10,
     borderWidth: 1,
+  },
+  palmMessage: {
+    marginTop: 10,
+    lineHeight: 20,
   },
   muted: {},
   error: { marginTop: 6 },

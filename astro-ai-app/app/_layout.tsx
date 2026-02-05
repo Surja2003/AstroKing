@@ -72,13 +72,6 @@ export default function RootLayout() {
             <Stack.Screen name="chat" options={{ title: t('nav.aiAstroChat') }} />
             <Stack.Screen name="history" options={{ title: t('nav.yourHistory') }} />
             <Stack.Screen name="weekly" options={{ title: t('nav.weeklyReport') }} />
-            <Stack.Screen
-              name="camera"
-              options={{
-                title: t('nav.palmScan'),
-                presentation: 'modal',
-              }}
-            />
             <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
             <Stack.Screen name="modal" options={{ presentation: 'modal', title: 'Modal' }} />
           </Stack>
