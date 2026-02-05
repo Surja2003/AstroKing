@@ -18,9 +18,9 @@ For the overall repo overview (backend + ML + archetypes), see the root README: 
    npx expo start
    ```
 
-## Native modules (AsyncStorage) — use a Dev Build
+## Native modules (FastOpenCV, AsyncStorage) — use a Dev Build
 
-If you see `NativeModule: AsyncStorage is null`, you are running the app in **Expo Go**.
+If you see errors like `NativeModule: AsyncStorage is null` (or OpenCV not available), you are running the app in **Expo Go**.
 Expo Go can’t load arbitrary native modules; you need a **development build**.
 
 One-time setup:
@@ -45,6 +45,35 @@ Then start Metro for the dev client:
 
 ```bash
 npx expo start --dev-client -c
+
+### EAS Build (recommended on Windows)
+
+This repo already includes an `eas.json` profile named `development`.
+
+One-time:
+
+```bash
+npx eas login
+npx eas whoami
+```
+
+Build a dev client (cloud):
+
+```bash
+cd astro-ai-app
+
+# Android dev client (.apk)
+npx eas build --platform android --profile development
+
+# iOS dev client (cloud build; requires Apple credentials in EAS)
+npx eas build --platform ios --profile development
+```
+
+After installing the build on your device, start Metro with:
+
+```bash
+npm run start:dev-client:clean
+```
 ```
 
 ## Backend (FastAPI)

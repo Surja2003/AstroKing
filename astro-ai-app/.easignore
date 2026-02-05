@@ -1,0 +1,27 @@
+# EAS Build upload ignore rules
+# Keep the source needed to build, but exclude local caches and build outputs.
+
+# dependencies / package manager artifacts
+node_modules/
+
+# Expo / Metro
+.expo/
+.expo-shared/
+web-build/
+dist/
+build/
+
+# Android local build outputs / caches
+android/.gradle/
+android/.idea/
+android/.cxx/
+android/app/build/
+android/build/
+
+# iOS local build outputs / caches (if present)
+ios/Pods/
+ios/build/
+
+# Misc
+**/.DS_Store
+**/*.log
