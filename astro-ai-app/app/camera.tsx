@@ -207,29 +207,9 @@ export default function CameraScreen() {
       try {
         return await analyzeOnDeviceAndSend(input.uri);
       } catch {
-        // If on-device CV fails, fall back to image upload.
+        Alert.alert(t('camera.uploadFailed'), 'Lighting too low. Try again in brighter light.');
+        return { result: '' };
       }
-
-      const formData = new FormData();
-      formData.append('file', {
-        uri: input.uri,
-        name: 'palm.jpg',
-        type: 'image/jpeg',
-      } as any);
-      formData.append('name', name);
-      formData.append('dob', dob);
-      formData.append('overlay', 'false');
-
-      const url = `${api.defaults.baseURL}/scan-palm`;
-      const res = await fetch(url, {
-        method: 'POST',
-        body: formData,
-      });
-      if (!res.ok) {
-        const txt = await res.text();
-        throw new Error(txt || `Scan failed (${res.status})`);
-      }
-      return await res.json();
     }
 
     let base64 = input?.base64;

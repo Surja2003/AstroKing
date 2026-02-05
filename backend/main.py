@@ -11,24 +11,32 @@ import base64
 import io
 import os
 from datetime import datetime, timedelta
-from PIL import Image
-from PIL import ImageFile
 from typing import Any
 from typing import List
 from typing import Optional
 import random
-import requests
 import sys
 import threading
-from textblob import TextBlob
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    # Optional heavy dependencies (imported lazily at runtime where used)
+    from PIL import Image  # type: ignore
+    from PIL import ImageFile  # type: ignore
 
 from database import Base, SessionLocal, engine
 import models as db_models
 
 app = FastAPI()
 
-# Some mobile uploads can be slightly truncated; Pillow can still decode many of them.
-ImageFile.LOAD_TRUNCATED_IMAGES = True
+def _configure_pillow():
+    try:
+        from PIL import ImageFile  # type: ignore
+
+        # Some mobile uploads can be slightly truncated; Pillow can still decode many of them.
+        ImageFile.LOAD_TRUNCATED_IMAGES = True
+    except Exception:
+        pass
 
 
 def _mp_hand_model_path() -> str:
@@ -151,6 +159,8 @@ def send_push_notification(token: str, message: str):
         "body": message,
     }
     try:
+        import requests  # type: ignore
+
         return requests.post(url, json=payload, timeout=10)
     except Exception:
         return None
@@ -203,22 +213,20 @@ def analyze_palm(data: dict):
     Intended for on-device CV where the phone sends only extracted numbers.
     """
 
+    d = data.get("lineDensity", 0)
     try:
-        density = float(data.get("lineDensity"))
+        d = float(d)
     except Exception:
-        density = None
+        d = 0.0
 
-    if density is None:
-        return Response(content="Invalid payload", media_type="text/plain", status_code=422)
-
-    if density > 30000:
-        personality = "Emotionally intense & intuitive"
-    elif density > 20000:
-        personality = "Balanced and practical"
+    if d > 35000:
+        result = "Strong emotional lines — intuitive personality"
+    elif d > 25000:
+        result = "Balanced and practical nature"
     else:
-        personality = "Calm and analytical"
+        result = "Calm, analytical thinker"
 
-    return {"result": personality}
+    return {"result": result}
 
 
 def _get_or_create_user(db, *, name: str, dob: str, token: Optional[str] = None) -> db_models.User:
@@ -270,6 +278,9 @@ def _downscale_image_bytes(image_bytes: bytes, *, max_side: int = 1024, jpeg_qua
     """
 
     try:
+        _configure_pillow()
+        from PIL import Image  # type: ignore
+
         img = Image.open(io.BytesIO(image_bytes))
         img = img.convert("RGB")
 
@@ -426,6 +437,9 @@ async def scan_palm(
 
     saved_rel_path: Optional[str] = None
     try:
+        _configure_pillow()
+        from PIL import Image  # type: ignore
+
         img = Image.open(io.BytesIO(contents))
         filename = os.path.join(out_dir, f"palm_{stamp}.jpg")
         img.save(filename)
@@ -868,6 +882,8 @@ def detect_emotion(text: str) -> str:
         return "happy"
 
     try:
+        from textblob import TextBlob  # type: ignore
+
         analysis = TextBlob(text or "")
         polarity = float(analysis.sentiment.polarity)
     except Exception:
@@ -962,6 +978,8 @@ def daily_insight(user: User):
             "body": insight,
         }
         try:
+            import requests  # type: ignore
+
             requests.post(url, json=payload, timeout=10)
         except Exception:
             pass

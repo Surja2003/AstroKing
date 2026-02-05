@@ -10,6 +10,7 @@ import { useColorScheme } from '@/hooks/use-color-scheme';
 import { UserProvider } from '@/context/user-context';
 import '@/lib/i18n';
 import { getAppColors } from '@/lib/ui-theme';
+import { api } from '@/lib/api';
 
 export const unstable_settings = {
   anchor: '(tabs)',
@@ -21,6 +22,16 @@ export default function RootLayout() {
   const { t } = useTranslation();
   const isDark = colorScheme === 'dark';
   const c = getAppColors(colorScheme);
+
+  useEffect(() => {
+    // Keep-alive ping: wakes Render free tier before user triggers a scan.
+    // Fire-and-forget; failures are ignored.
+    fetch(`${api.defaults.baseURL}/analyze-palm`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lineDensity: 1 }),
+    }).catch(() => {});
+  }, []);
 
   useEffect(() => {
     let sub: any;
