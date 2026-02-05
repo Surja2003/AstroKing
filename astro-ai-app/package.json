@@ -22,6 +22,7 @@
     "@react-navigation/native": "^7.1.28",
     "@react-navigation/stack": "^7.6.16",
     "axios": "^1.13.4",
+    "base64-js": "^1.5.1",
     "expo": "~54.0.32",
     "expo-blur": "~15.0.8",
     "expo-camera": "~17.0.10",
@@ -54,7 +55,8 @@
     "react-native-safe-area-context": "~5.6.0",
     "react-native-screens": "~4.16.0",
     "react-native-web": "~0.21.0",
-    "react-native-worklets": "0.5.1"
+    "react-native-worklets": "0.5.1",
+    "upng-js": "^2.1.0"
   },
   "devDependencies": {
     "@types/react": "~19.1.0",

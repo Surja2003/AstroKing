@@ -10,6 +10,8 @@ import { useColorScheme } from '../hooks/use-color-scheme';
 import { getAppColors } from '../lib/ui-theme';
 import { requireOptionalNativeModule } from 'expo-modules-core';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as UPNG from 'upng-js';
+import { toByteArray } from 'base64-js';
 
 export default function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -130,25 +132,87 @@ export default function CameraScreen() {
     const name = user?.name?.trim() || 'Friend';
     const dob = user?.dob?.trim() || '2000-01-01';
 
-    // Prefer multipart upload on native (faster, avoids huge JSON payloads).
+    const analyzeOnDeviceAndSend = async (uri: string) => {
+      // Convert to a small PNG (predictable decoding) and compute an edge-density feature.
+      // Then send ONLY numbers to the backend.
+      const manipulated = await ImageManipulator.manipulateAsync(
+        uri,
+        [{ resize: { width: 512 } }],
+        { format: ImageManipulator.SaveFormat.PNG, base64: true }
+      );
+
+      const b64 = manipulated?.base64;
+      if (!b64) throw new Error('Could not read image');
+
+      const bytes = toByteArray(b64);
+      const png = UPNG.decode(bytes.buffer);
+      // toRGBA8 returns an array of frames; we only have 1 frame.
+      const rgbaFrames = UPNG.toRGBA8(png);
+      const rgba = rgbaFrames?.[0];
+      if (!rgba) throw new Error('Could not decode image');
+
+      const w = png.width | 0;
+      const h = png.height | 0;
+      if (!w || !h) throw new Error('Invalid image size');
+
+      // Grayscale
+      const gray = new Uint8Array(w * h);
+      for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
+        const r = rgba[p] as number;
+        const g = rgba[p + 1] as number;
+        const b = rgba[p + 2] as number;
+        gray[i] = ((r * 30 + g * 59 + b * 11) / 100) | 0;
+      }
+
+      // Simple Sobel edge count (proxy for "line density")
+      let edgeCount = 0;
+      const thr = 80; // tuned for 512px inputs; adjust if needed
+
+      for (let y = 1; y < h - 1; y++) {
+        const row = y * w;
+        for (let x = 1; x < w - 1; x++) {
+          const i = row + x;
+
+          const a00 = gray[i - w - 1];
+          const a01 = gray[i - w];
+          const a02 = gray[i - w + 1];
+          const a10 = gray[i - 1];
+          const a12 = gray[i + 1];
+          const a20 = gray[i + w - 1];
+          const a21 = gray[i + w];
+          const a22 = gray[i + w + 1];
+
+          const gx = -a00 + a02 - (a10 << 1) + (a12 << 1) - a20 + a22;
+          const gy = -a00 - (a01 << 1) - a02 + a20 + (a21 << 1) + a22;
+          const mag = Math.abs(gx) + Math.abs(gy);
+          if (mag > thr) edgeCount++;
+        }
+      }
+
+      const res = await fetch(`${api.defaults.baseURL}/analyze-palm`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lineDensity: edgeCount, name, dob }),
+      });
+
+      if (!res.ok) {
+        const txt = await res.text();
+        throw new Error(txt || `Analyze failed (${res.status})`);
+      }
+      return await res.json();
+    };
+
+    // Prefer on-device feature extraction on native.
     if (Platform.OS !== 'web' && input?.uri) {
-      let uploadUri = input.uri;
       try {
-        // Gallery photos can be very large (12MP+). Resize/compress to reduce upload time
-        // and keep server-side processing under Render gateway time limits.
-        const manipulated = await ImageManipulator.manipulateAsync(
-          uploadUri,
-          [{ resize: { width: 1024 } }],
-          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
-        );
-        if (manipulated?.uri) uploadUri = manipulated.uri;
+        return await analyzeOnDeviceAndSend(input.uri);
       } catch {
-        // If manipulation fails (rare), fall back to the original uri.
+        // If on-device CV fails, fall back to image upload.
       }
 
       const formData = new FormData();
       formData.append('file', {
-        uri: uploadUri,
+        uri: input.uri,
         name: 'palm.jpg',
         type: 'image/jpeg',
       } as any);
@@ -190,6 +254,11 @@ export default function CameraScreen() {
   };
 
   const showResultAlert = (data: any) => {
+    if (typeof data?.result === 'string' && data.result.trim()) {
+      Alert.alert(t('camera.analysis'), data.result.trim());
+      return;
+    }
+
     const traits: string[] = data?.traits ?? data?.analysis?.traits ?? [];
     const personality = data?.personality;
     const personalityTraits: string[] = personality?.traits ?? [];

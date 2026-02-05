@@ -196,6 +196,31 @@ class SessionSummaryCreate(BaseModel):
     summary: SessionSummaryPayload
 
 
+@app.post("/analyze-palm")
+def analyze_palm(data: dict):
+    """Lightweight endpoint: accepts numeric palm features and returns a label.
+
+    Intended for on-device CV where the phone sends only extracted numbers.
+    """
+
+    try:
+        density = float(data.get("lineDensity"))
+    except Exception:
+        density = None
+
+    if density is None:
+        return Response(content="Invalid payload", media_type="text/plain", status_code=422)
+
+    if density > 30000:
+        personality = "Emotionally intense & intuitive"
+    elif density > 20000:
+        personality = "Balanced and practical"
+    else:
+        personality = "Calm and analytical"
+
+    return {"result": personality}
+
+
 def _get_or_create_user(db, *, name: str, dob: str, token: Optional[str] = None) -> db_models.User:
     user = db.query(db_models.User).filter_by(name=name, dob=dob).first()
     zodiac = get_zodiac(dob)
