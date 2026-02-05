@@ -27,6 +27,65 @@ import models as db_models
 
 app = FastAPI()
 
+# Some mobile uploads can be slightly truncated; Pillow can still decode many of them.
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
+
+def _mp_hand_model_path() -> str:
+    base_dir = os.path.dirname(__file__)
+    return os.path.join(base_dir, "mp_models", "hand_landmarker.task")
+
+
+def _mp_hand_model_ready() -> bool:
+    try:
+        p = _mp_hand_model_path()
+        return os.path.exists(p) and os.path.getsize(p) > 0
+    except Exception:
+        return False
+
+
+def _warmup_models_background() -> None:
+    """Best-effort background warmup.
+
+    On Render/free tiers, the first request can be killed by gateway timeouts if we
+    download/load MediaPipe models on-demand. Warm them up asynchronously on startup.
+    """
+
+    def _run():
+        try:
+            # Warm up MediaPipe model download + landmarker init.
+            from palm_cv import _ensure_hand_landmarker_model  # type: ignore
+            from palm_cv import _get_hand_landmarker_image  # type: ignore
+            from palm_cv import _get_hand_landmarker_video  # type: ignore
+
+            _ensure_hand_landmarker_model()
+            _get_hand_landmarker_image()
+            _get_hand_landmarker_video()
+        except Exception as e:
+            try:
+                print(f"[warmup] palm_cv warmup failed: {e}")
+            except Exception:
+                pass
+
+        try:
+            # Warm up the embedding interpreter (does not require an image).
+            from palm_ml import get_embedding_dim
+
+            _ = get_embedding_dim()
+        except Exception as e:
+            try:
+                print(f"[warmup] palm_ml warmup failed: {e}")
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+
+
+@app.on_event("startup")
+def _on_startup():
+    _warmup_models_background()
+
 
 @app.get("/")
 def root():
@@ -178,6 +237,36 @@ def _guess_ext(data: bytes) -> str:
     return "bin"
 
 
+def _downscale_image_bytes(image_bytes: bytes, *, max_side: int = 1024, jpeg_quality: int = 85) -> bytes:
+    """Downscale/compress images to keep inference fast and uploads small.
+
+    Render (and mobile networks) can time out on very large images.
+    We convert to JPEG and cap the longest side to `max_side`.
+    """
+
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        img = img.convert("RGB")
+
+        w, h = img.size
+        longest = max(w, h)
+        if longest > max_side:
+            scale = max_side / float(longest)
+            new_w = max(1, int(round(w * scale)))
+            new_h = max(1, int(round(h * scale)))
+
+            # Pillow 10+: Image.Resampling.LANCZOS, older: Image.LANCZOS
+            resample = getattr(getattr(Image, "Resampling", Image), "LANCZOS", Image.LANCZOS)
+            img = img.resize((new_w, new_h), resample=resample)
+
+        buf = io.BytesIO()
+        # Avoid optimize=True on small CPUs; it can add noticeable latency.
+        img.save(buf, format="JPEG", quality=int(jpeg_quality))
+        return buf.getvalue()
+    except Exception:
+        return image_bytes
+
+
 def analyze_palm_image(image_bytes: bytes) -> dict[str, Any]:
     """Analyze an image of a palm/hand.
 
@@ -187,19 +276,21 @@ def analyze_palm_image(image_bytes: bytes) -> dict[str, Any]:
 
     result: dict[str, Any] = {"features": {}, "traits": []}
 
-    # 1) Prefer MediaPipe-based analysis.
-    try:
-        from palm_cv import analyze_palm_image as analyze_with_mp
+    # 1) Prefer MediaPipe-based analysis, but ONLY if the model is already present.
+    # Downloading the model on-demand can exceed Render gateway time limits.
+    if _mp_hand_model_ready():
+        try:
+            from palm_cv import analyze_palm_image as analyze_with_mp
 
-        r = analyze_with_mp(image_bytes, return_overlay=False)
-        return {
-            "status": r.status,
-            "features": r.features,
-            "traits": r.traits,
-        }
-    except Exception:
-        # Fall through to OpenCV-only heuristic.
-        pass
+            r = analyze_with_mp(image_bytes, return_overlay=False)
+            return {
+                "status": r.status,
+                "features": r.features,
+                "traits": r.traits,
+            }
+        except Exception:
+            # Fall through to OpenCV-only heuristic.
+            pass
 
     # 2) Fallback: OpenCV-only analysis (no landmarks).
     try:
@@ -299,6 +390,8 @@ async def scan_palm(
     """
 
     contents = await file.read()
+    # Large gallery images can be 3–10MB+ and slow down MediaPipe/model inference.
+    contents = _downscale_image_bytes(contents, max_side=1024, jpeg_quality=85)
 
     # Save the uploaded image (for History screen parity with /upload-palm).
     base_dir = os.path.dirname(__file__)
@@ -309,7 +402,7 @@ async def scan_palm(
     saved_rel_path: Optional[str] = None
     try:
         img = Image.open(io.BytesIO(contents))
-        filename = os.path.join(out_dir, f"palm_{stamp}.png")
+        filename = os.path.join(out_dir, f"palm_{stamp}.jpg")
         img.save(filename)
         saved_rel_path = os.path.relpath(filename, base_dir).replace("\\", "/")
     except Exception:
@@ -320,7 +413,7 @@ async def scan_palm(
         saved_rel_path = os.path.relpath(filename, base_dir).replace("\\", "/")
 
     overlay_rel_path: Optional[str] = None
-    if overlay:
+    if overlay and _mp_hand_model_ready():
         try:
             from palm_cv import analyze_palm_image as analyze_with_mp
 
@@ -368,6 +461,8 @@ async def scan_palm_personality(file: UploadFile = File(...), top_k: int = Form(
 @app.post("/scan-palm/overlay")
 async def scan_palm_overlay(file: UploadFile = File(...)):
     """Returns a JPEG with landmarks drawn (no DB write)."""
+    if not _mp_hand_model_ready():
+        return Response(content=b"warming_up", media_type="text/plain", status_code=503)
     try:
         from palm_cv import analyze_palm_image as analyze_with_mp
 
@@ -386,6 +481,13 @@ async def scan_palm_quality(file: UploadFile = File(...)):
 
     Intended for preview-frame polling from the mobile app.
     """
+
+    if not _mp_hand_model_ready():
+        return {
+            "status": "warming_up",
+            "message": "Model warming up — try again in a few seconds",
+            "metrics": {},
+        }
 
     try:
         from palm_cv import assess_frame_quality
@@ -411,6 +513,9 @@ async def detect_hand_live(file: UploadFile = File(...)):
 
     Returns `detected` plus an optional normalized bounding box.
     """
+
+    if not _mp_hand_model_ready():
+        return {"detected": False, "reason": "warming_up"}
 
     try:
         from palm_cv import detect_hand_live as detect_live
@@ -915,10 +1020,10 @@ def chat(chat: Chat):
 
 @app.post("/upload-palm")
 def upload_palm(data: PalmImage):
-    ImageFile.LOAD_TRUNCATED_IMAGES = True
-
     b64 = _strip_data_url(data.image)
     img_bytes = base64.b64decode(b64)
+
+    img_bytes = _downscale_image_bytes(img_bytes, max_side=1024, jpeg_quality=85)
 
     base_dir = os.path.dirname(__file__)
     out_dir = os.path.join(base_dir, "palm_images")
@@ -929,11 +1034,11 @@ def upload_palm(data: PalmImage):
     analysis = analyze_palm_image(img_bytes)
     personality = analyze_palm_personality(img_bytes, top_k=3)
 
-    # Prefer decoding + re-encoding via Pillow (gives consistent PNG output),
+    # Prefer decoding + re-encoding via Pillow (gives consistent output),
     # but fall back to saving raw bytes if the image stream is imperfect.
     try:
         img = Image.open(io.BytesIO(img_bytes))
-        filename = os.path.join(out_dir, f"palm_{stamp}.png")
+        filename = os.path.join(out_dir, f"palm_{stamp}.jpg")
         img.save(filename)
         out_file = filename
     except Exception:

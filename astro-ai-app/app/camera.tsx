@@ -9,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { useColorScheme } from '../hooks/use-color-scheme';
 import { getAppColors } from '../lib/ui-theme';
 import { requireOptionalNativeModule } from 'expo-modules-core';
+import * as ImageManipulator from 'expo-image-manipulator';
 
 export default function CameraScreen() {
   const [permission, requestPermission] = useCameraPermissions();
@@ -131,9 +132,23 @@ export default function CameraScreen() {
 
     // Prefer multipart upload on native (faster, avoids huge JSON payloads).
     if (Platform.OS !== 'web' && input?.uri) {
+      let uploadUri = input.uri;
+      try {
+        // Gallery photos can be very large (12MP+). Resize/compress to reduce upload time
+        // and keep server-side processing under Render gateway time limits.
+        const manipulated = await ImageManipulator.manipulateAsync(
+          uploadUri,
+          [{ resize: { width: 1024 } }],
+          { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
+        );
+        if (manipulated?.uri) uploadUri = manipulated.uri;
+      } catch {
+        // If manipulation fails (rare), fall back to the original uri.
+      }
+
       const formData = new FormData();
       formData.append('file', {
-        uri: input.uri,
+        uri: uploadUri,
         name: 'palm.jpg',
         type: 'image/jpeg',
       } as any);
